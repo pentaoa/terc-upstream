@@ -2,7 +2,7 @@
 
 All notable changes to terc. 中文在前，English follows each section.
 
-## Unreleased
+## v0.2.1
 
 ### 中文
 
