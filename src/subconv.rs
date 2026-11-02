@@ -202,13 +202,15 @@ pub fn parse_node_line_noting(line: &str, dropped: &mut Vec<String>) -> Result<V
     let line = line.trim().trim_start_matches('\u{feff}');
     if line.starts_with('{') {
         let mut value: Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
+        let tailscale = value["type"].as_str() == Some("tailscale");
         if value["name"].as_str().is_none()
             || value["type"].as_str().is_none()
-            || value["server"].as_str().is_none()
-            || value["port"]
-                .as_u64()
-                .filter(|p| (1..=65535).contains(p))
-                .is_none()
+            || (!tailscale
+                && (value["server"].as_str().is_none()
+                    || value["port"]
+                        .as_u64()
+                        .filter(|p| (1..=65535).contains(p))
+                        .is_none()))
         {
             return Err("节点缺少名称、类型、服务器或有效端口 / Incomplete proxy".into());
         }
@@ -2053,6 +2055,16 @@ pub fn encode_base64(input: &[u8]) -> String {
 
 /// One-line summary safe for UI and logs: never includes secrets.
 pub fn node_summary(node: &Value) -> String {
+    if node["type"].as_str() == Some("tailscale") {
+        let hostname = node["hostname"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("auto");
+        return match node["exit-node"].as_str().filter(|s| !s.is_empty()) {
+            Some(exit) => format!("tailscale  {hostname} → {exit}"),
+            None => format!("tailscale  {hostname} (Tailnet)"),
+        };
+    }
     format!(
         "{}  {}:{}",
         node["type"].as_str().unwrap_or("?"),
@@ -2621,6 +2633,14 @@ FINAL,Proxy,dns-failed
             parse_node_line("socks5://u:p@192.0.2.1:1080#S").unwrap()["username"],
             "u"
         );
+    }
+
+    #[test]
+    fn tailscale_json_node_needs_no_server_or_port() {
+        let node = parse_node_line(r#"{"name":"Tailnet","type":"tailscale","auth-key":"tskey-auth-example","exit-node":"100.64.0.7"}"#).unwrap();
+        assert_eq!(node["exit-node"], "100.64.0.7");
+        assert!(!node_summary(&node).contains("tskey-auth-example"));
+        assert!(parse_node_line(r#"{"name":"Broken","type":"ss"}"#).is_err());
     }
 
     // Placeholder keys: 32 bytes of 0x01 / 0x02, and 0x03 as hex.

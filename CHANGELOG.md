@@ -2,6 +2,16 @@
 
 All notable changes to terc. 中文在前，English follows each section.
 
+## v0.2.2
+
+### 中文
+
+- 添加和编辑 Tailscale 出站，支持 Auth key、独立状态目录、可选出口和子网路由；可将现有订阅附加节点优先用于 `ts.net`。提供 Tailscale MagicDNS 配置片段。
+
+### English
+
+- Add and edit Tailscale outbounds with Auth key, per-node state, optional exit node and subnet routes; optionally route `ts.net` through a node attached to the active source. Add a Tailscale MagicDNS snippet.
+
 ## v0.2.1
 
 ### 中文

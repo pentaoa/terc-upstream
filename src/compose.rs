@@ -3180,6 +3180,27 @@ mod tests {
     }
 
     #[test]
+    fn tailscale_manual_node_and_route_keep_subscription_rules() {
+        let source = "proxies:\n  - {name: AirportNode, type: ss, server: 192.0.2.1, port: 443, cipher: aes-128-gcm, password: fake}\nproxy-groups:\n  - {name: Airport, type: select, proxies: [AirportNode]}\nrules:\n  - DOMAIN-SUFFIX,example.org,Airport\n  - MATCH,Airport\n";
+        let subscription = convert_subscription(source).unwrap();
+        let nodes = manual(&[
+            r#"{"name":"Tailnet","type":"tailscale","state-dir":"/tmp/terc-test-state","auth-key":"tskey-auth-test","udp":true}"#,
+        ]);
+        let rules = PrivateRules {
+            rules: vec!["DOMAIN-SUFFIX,ts.net,Tailnet".into()],
+            ..Default::default()
+        };
+        let (base, _) = compose_profile(&input(Some(&subscription), &nodes, &rules)).unwrap();
+        let generated = prepend_manual_rules(&base, &rules.rules).unwrap();
+        let manual = generated.find("DOMAIN-SUFFIX,ts.net,Tailnet").unwrap();
+        let original = generated.find("DOMAIN-SUFFIX,example.org,Airport").unwrap();
+        assert!(manual < original);
+        assert!(generated.contains("MATCH,Airport"));
+        assert!(generated.contains("tskey-auth-test"));
+        assert_eq!(subscription.clash_doc.as_deref(), Some(source));
+    }
+
+    #[test]
     fn manual_only_config_has_terc_groups_and_ai_rules() {
         let nodes = manual(&[
             "🇺🇸 Fake-US = ss, 192.0.2.1, 8388, encrypt-method=2022-blake3-aes-128-gcm, password=AAAAAAAAAAAAAAAAAAAAAA==, udp-relay=true, tfo=true",

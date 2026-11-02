@@ -239,6 +239,13 @@ dns:
             builtin: true,
         },
         ModuleSnippet {
+            id: "tailscale-dns".into(),
+            name: "Tailscale MagicDNS".into(),
+            description: "Resolve ts.net with Tailscale DNS; add a DIRECT rule".into(),
+            body: "dns:\n  nameserver-policy:\n    '+.ts.net': 100.100.100.100".into(),
+            builtin: true,
+        },
+        ModuleSnippet {
             id: "find-process".into(),
             name: "Find process".into(),
             description: "Always attach process name to connections".into(),
@@ -1658,6 +1665,18 @@ mod tests {
         let mainland = apply_enabled_modules("proxies: []\n", &pick("dns-fakeip")).unwrap();
         assert!(!mainland.contains("respect-rules"));
         assert!(!mainland.contains("dns.google"));
+    }
+
+    #[test]
+    fn tailscale_dns_module_preserves_source_dns_and_rules() {
+        let source = "dns:\n  enable: true\n  nameserver:\n    - 1.1.1.1\n  nameserver-policy:\n    '+.internal': 192.0.2.53\nrules:\n  - MATCH,Proxy\n";
+        let modules = enabled_snippets(&builtin_modules(), &["tailscale-dns".into()]);
+        let applied = apply_enabled_modules(source, &modules).unwrap();
+        assert!(applied.contains("    '+.ts.net': 100.100.100.100\n"));
+        assert!(applied.contains("    '+.internal': 192.0.2.53\n"));
+        assert!(applied.contains("    - 1.1.1.1\n"));
+        assert!(applied.contains("  - MATCH,Proxy\n"));
+        assert_eq!(strip_marked_modules(&applied), source);
     }
 
     #[test]

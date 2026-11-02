@@ -17,6 +17,7 @@ const TYPES: &[&str] = &[
     "http",
     "hysteria2",
     "tuic",
+    "tailscale",
 ];
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {
@@ -38,6 +39,12 @@ pub enum Field {
     EarlyData,
     FastOpen,
     Flow,
+    TailHostname,
+    TailAuthKey,
+    TailExitNode,
+    TailControlUrl,
+    TailAcceptRoutes,
+    TailUdp,
     Save,
 }
 #[derive(Clone, Debug)]
@@ -49,6 +56,9 @@ pub struct Form {
     pub index: usize,
     pub editing: bool,
     pub submitting: bool,
+    /// A Tailscale node attached to the current source, optionally editing a row.
+    pub manual_tailscale: bool,
+    pub manual_index: Option<usize>,
     pub name: LineEditor,
     pub url: LineEditor,
     pub server: LineEditor,
@@ -62,6 +72,13 @@ pub struct Form {
     pub ws_host: LineEditor,
     pub early_data: LineEditor,
     pub flow: LineEditor,
+    pub tail_hostname: LineEditor,
+    pub tail_auth_key: LineEditor,
+    pub tail_exit_node: LineEditor,
+    pub tail_control_url: LineEditor,
+    pub tail_state_dir: String,
+    pub tail_accept_routes: bool,
+    pub tail_udp: bool,
     pub tls: bool,
     pub ws: bool,
     /// V2Ray HTTPUpgrade: `network: ws` + `ws-opts.v2ray-http-upgrade`.
@@ -78,6 +95,8 @@ impl Default for Form {
             index: 0,
             editing: false,
             submitting: false,
+            manual_tailscale: false,
+            manual_index: None,
             name: Default::default(),
             url: Default::default(),
             server: Default::default(),
@@ -91,6 +110,24 @@ impl Default for Form {
             ws_host: Default::default(),
             early_data: Default::default(),
             flow: Default::default(),
+            tail_hostname: Default::default(),
+            tail_auth_key: Default::default(),
+            tail_exit_node: Default::default(),
+            tail_control_url: Default::default(),
+            tail_state_dir: crate::compose::terc_dir()
+                .join("tailscale")
+                .join(format!(
+                    "node-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                ))
+                .to_string_lossy()
+                .into_owned(),
+            tail_accept_routes: false,
+            tail_udp: true,
             tls: false,
             ws: false,
             upgrade: false,
@@ -103,6 +140,30 @@ impl Default for Form {
     }
 }
 impl Form {
+    pub fn manual_tailscale(index: Option<usize>, node: Option<Value>) -> Self {
+        let mut form = if let Some(node) = node {
+            let name = node["name"].as_str().unwrap_or("").to_string();
+            Self::from_record(
+                String::new(),
+                ProfileSource {
+                    name,
+                    nodes: vec![node],
+                    ..Default::default()
+                },
+            )
+        } else {
+            let mut form = Self {
+                kind: 1,
+                ..Self::default()
+            };
+            form.protocol = TYPES.iter().position(|p| *p == "tailscale").unwrap();
+            form
+        };
+        form.manual_tailscale = true;
+        form.manual_index = index;
+        form.edit_id = None;
+        form
+    }
     pub fn from_record(id: String, source: ProfileSource) -> Self {
         let mut f = Self {
             edit_id: Some(id),
@@ -121,11 +182,23 @@ impl Form {
                     .iter()
                     .position(|t| Some(*t) == n["type"].as_str())
                     .unwrap_or(0);
+                if TYPES[f.protocol] == "tailscale" {
+                    f.tail_auth_key.load(n["auth-key"].as_str().unwrap_or(""));
+                    f.tail_hostname.load(n["hostname"].as_str().unwrap_or(""));
+                    f.tail_exit_node.load(n["exit-node"].as_str().unwrap_or(""));
+                    f.tail_control_url
+                        .load(n["control-url"].as_str().unwrap_or(""));
+                    f.tail_state_dir = n["state-dir"].as_str().unwrap_or("").to_string();
+                    f.tail_accept_routes = n["accept-routes"].as_bool().unwrap_or(false);
+                    f.tail_udp = n["udp"].as_bool().unwrap_or(false);
+                }
                 f.server.load(n["server"].as_str().unwrap_or(""));
                 f.port.load(&n["port"].to_string());
                 f.user.load(n["username"].as_str().unwrap_or(""));
-                f.secret
-                    .load(n["uuid"].as_str().or(n["password"].as_str()).unwrap_or(""));
+                if TYPES[f.protocol] != "tailscale" {
+                    f.secret
+                        .load(n["uuid"].as_str().or(n["password"].as_str()).unwrap_or(""));
+                }
                 f.password.load(n["password"].as_str().unwrap_or(""));
                 f.cipher.load(n["cipher"].as_str().unwrap_or("aes-128-gcm"));
                 f.sni
@@ -162,12 +235,31 @@ impl Form {
     }
     pub fn fields(&self) -> Vec<Field> {
         use Field::*;
-        let mut fields = vec![Kind, Name];
+        let mut fields = if self.manual_tailscale {
+            vec![Name]
+        } else {
+            vec![Kind, Name]
+        };
         if self.kind != 1 {
             fields.push(Url);
         } else {
-            fields.extend([Protocol, Server, Port]);
             let p = TYPES[self.protocol];
+            if !self.manual_tailscale {
+                fields.push(Protocol);
+            }
+            if p == "tailscale" {
+                fields.extend([
+                    TailHostname,
+                    TailAuthKey,
+                    TailExitNode,
+                    TailControlUrl,
+                    TailAcceptRoutes,
+                    TailUdp,
+                    Save,
+                ]);
+                return fields;
+            }
+            fields.extend([Server, Port]);
             if matches!(p, "socks5" | "http") {
                 fields.push(User);
             }
@@ -214,6 +306,10 @@ impl Form {
             WsHost => &mut self.ws_host,
             EarlyData => &mut self.early_data,
             Flow => &mut self.flow,
+            TailHostname => &mut self.tail_hostname,
+            TailAuthKey => &mut self.tail_auth_key,
+            TailExitNode => &mut self.tail_exit_node,
+            TailControlUrl => &mut self.tail_control_url,
             _ => return None,
         })
     }
@@ -233,6 +329,10 @@ impl Form {
             WsHost => &self.ws_host,
             EarlyData => &self.early_data,
             Flow => &self.flow,
+            TailHostname => &self.tail_hostname,
+            TailAuthKey => &self.tail_auth_key,
+            TailExitNode => &self.tail_exit_node,
+            TailControlUrl => &self.tail_control_url,
             _ => return None,
         })
     }
@@ -306,6 +406,34 @@ impl Form {
             }
         } else {
             let p = TYPES[self.protocol];
+            if p == "tailscale" {
+                let mut node = self
+                    .original
+                    .nodes
+                    .first()
+                    .filter(|n| n["type"] == "tailscale")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                node["name"] = json!(result.name);
+                node["type"] = json!("tailscale");
+                for (key, value) in [
+                    ("hostname", self.tail_hostname.trimmed()),
+                    ("auth-key", self.tail_auth_key.trimmed()),
+                    ("exit-node", self.tail_exit_node.trimmed()),
+                    ("control-url", self.tail_control_url.trimmed()),
+                    ("state-dir", self.tail_state_dir.clone()),
+                ] {
+                    if value.is_empty() {
+                        node.as_object_mut().unwrap().remove(key);
+                    } else {
+                        node[key] = json!(value);
+                    }
+                }
+                node["accept-routes"] = json!(self.tail_accept_routes);
+                node["udp"] = json!(self.tail_udp);
+                result.nodes = vec![node];
+                return Ok(result);
+            }
             let port = self
                 .port
                 .trimmed()
@@ -515,12 +643,25 @@ pub fn handle(app: &mut App, key: KeyEvent) {
         match form.record() {
             Ok(record) => {
                 let id = form.edit_id.clone();
+                let manual = form.manual_tailscale;
+                let manual_index = form.manual_index;
+                let previous_name = form
+                    .original
+                    .nodes
+                    .first()
+                    .and_then(|n| n["name"].as_str())
+                    .map(str::to_owned);
                 if app.action_busy {
                     return;
                 }
                 form.submitting = true;
                 // Not started (a reload prompt, or busy): keep the form editable.
-                if !app.save_source_record(record, id) {
+                let started = if manual {
+                    save_manual_tailscale(app, record, manual_index, previous_name.as_deref())
+                } else {
+                    app.save_source_record(record, id)
+                };
+                if !started {
                     if let Some(form) = app.proxy_form.as_mut() {
                         form.submitting = false;
                     }
@@ -585,6 +726,8 @@ pub fn handle(app: &mut App, key: KeyEvent) {
             }
             Field::Tls => form.tls = !form.tls,
             Field::FastOpen => form.fast_open = !form.fast_open,
+            Field::TailAcceptRoutes => form.tail_accept_routes = !form.tail_accept_routes,
+            Field::TailUdp => form.tail_udp = !form.tail_udp,
             // TCP → WebSocket → HTTPUpgrade → TCP.
             Field::Transport => {
                 let t = (form.transport() + if back { 2 } else { 1 }) % 3;
@@ -594,6 +737,73 @@ pub fn handle(app: &mut App, key: KeyEvent) {
             _ => form.editing = true,
         }
     }
+}
+fn save_manual_tailscale(
+    app: &mut App,
+    record: ProfileSource,
+    index: Option<usize>,
+    previous_name: Option<&str>,
+) -> bool {
+    let requested_name = record.nodes[0]["name"].as_str().unwrap_or("");
+    if previous_name != Some(requested_name)
+        && (app.snapshot.nodes.contains_key(requested_name)
+            || app.snapshot.groups.iter().any(|g| g.name == requested_name))
+    {
+        app.set_status(
+            "已有同名节点或策略组 / Name already used by a node or group",
+            true,
+        );
+        return false;
+    }
+    if app.config.controller.profile_id.is_empty()
+        && crate::mihomo::config_file_exists(&app.config.controller)
+    {
+        app.save_profile_copy();
+        if app.config.controller.profile_id.is_empty() {
+            return false;
+        }
+    }
+    let id = app.config.controller.profile_id.clone();
+    let source = ProfileSource::load(&crate::compose::profile_dir(&app.config.controller));
+    let source = match merge_manual_tailscale(source, record, index, previous_name) {
+        Ok(source) => source,
+        Err(err) => {
+            app.set_status(err, true);
+            return false;
+        }
+    };
+    app.save_source_record(source, if id.is_empty() { None } else { Some(id) })
+}
+
+fn merge_manual_tailscale(
+    mut source: ProfileSource,
+    record: ProfileSource,
+    index: Option<usize>,
+    previous_name: Option<&str>,
+) -> Result<ProfileSource, &'static str> {
+    let node = record.nodes[0].clone();
+    let name = node["name"].as_str().unwrap_or("");
+    if source
+        .nodes
+        .iter()
+        .enumerate()
+        .any(|(i, n)| Some(i) != index && n["name"].as_str() == Some(name))
+    {
+        return Err("已有同名节点 / Duplicate node name");
+    }
+    if let Some(i) = index {
+        if source.nodes.get(i).and_then(|n| n["name"].as_str()) != previous_name {
+            return Err("节点已变化，请重新打开 / Node changed; reopen the form");
+        }
+        source.nodes[i] = node;
+    } else {
+        source.nodes.push(node);
+    }
+    if source.name.is_empty() {
+        source.name = record.name;
+        source.kind = "proxy".into();
+    }
+    Ok(source)
 }
 pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
     let Some(f) = &app.proxy_form else {
@@ -609,7 +819,7 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
         ])
         .split(area);
     frame.render_widget(
-        Paragraph::new(if f.edit_id.is_some() {
+        Paragraph::new(if f.edit_id.is_some() || f.manual_index.is_some() {
             "编辑代理"
         } else {
             "添加代理"
@@ -687,7 +897,73 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
                 .into(),
             ),
             Flow => ("Flow（可选）", f.flow.text.clone()),
-            Save => ("保存并使用", String::new()),
+            TailHostname => (
+                l3(
+                    app,
+                    "设备名（可选）",
+                    "Device (optional)",
+                    "デバイス名（任意）",
+                ),
+                f.tail_hostname.text.clone(),
+            ),
+            TailAuthKey => (
+                l3(
+                    app,
+                    "Auth key（可选）",
+                    "Auth key (optional)",
+                    "Auth key（任意）",
+                ),
+                "*".repeat(f.tail_auth_key.text.chars().count().min(24)),
+            ),
+            TailExitNode => (
+                l3(
+                    app,
+                    "出口节点（可选）",
+                    "Exit node (optional)",
+                    "出口ノード（任意）",
+                ),
+                f.tail_exit_node.text.clone(),
+            ),
+            TailControlUrl => (
+                l3(
+                    app,
+                    "控制服务器（可选）",
+                    "Control URL (optional)",
+                    "制御 URL（任意）",
+                ),
+                f.tail_control_url.text.clone(),
+            ),
+            TailAcceptRoutes => (
+                l3(
+                    app,
+                    "接受子网路由",
+                    "Accept subnet routes",
+                    "サブネット経路",
+                ),
+                if f.tail_accept_routes {
+                    l3(app, "开启", "On", "オン")
+                } else {
+                    l3(app, "关闭", "Off", "オフ")
+                }
+                .into(),
+            ),
+            TailUdp => (
+                "UDP",
+                if f.tail_udp {
+                    l3(app, "开启", "On", "オン")
+                } else {
+                    l3(app, "关闭", "Off", "オフ")
+                }
+                .into(),
+            ),
+            Save => (
+                if f.manual_tailscale {
+                    "保存并应用"
+                } else {
+                    "保存并使用"
+                },
+                String::new(),
+            ),
         };
         let selected = i == f.index;
         let style = if selected {
@@ -724,7 +1000,7 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
                     .text
                     .chars()
                     .map(|c| {
-                        if matches!(field, Secret | Password) {
+                        if matches!(field, Secret | Password | TailAuthKey) {
                             '*'
                         } else if c == '\n' {
                             ' '
@@ -749,8 +1025,11 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
                 }
             }
         } else {
-            let value = if selected && matches!(field, Kind | Protocol | Tls | Transport | FastOpen)
-            {
+            let value = if selected
+                && matches!(
+                    field,
+                    Kind | Protocol | Tls | Transport | FastOpen | TailAcceptRoutes | TailUdp
+                ) {
                 format!("← {value} →")
             } else {
                 value
@@ -761,6 +1040,10 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(
         Paragraph::new(if app.action_busy {
             "正在校验并保存…"
+        } else if f.kind == 1 && TYPES[f.protocol] == "tailscale" && fields.get(f.index) == Some(&Field::TailAuthKey) {
+            l3(app, "首次授权用 Auth key；留空则首次连接后在内核日志查看登录链接。\nEnter 编辑  Ctrl+S 保存  Esc 返回", "Auth key enrolls the node; if empty, connect once and check the core log for a login URL.\nEnter edit  Ctrl+S save  Esc back", "Auth key は初回認証用。空欄なら初回接続後にコアログを確認。\nEnter 編集  Ctrl+S 保存  Esc 戻る")
+        } else if f.kind == 1 && TYPES[f.protocol] == "tailscale" && fields.get(f.index) == Some(&Field::TailExitNode) {
+            l3(app, "不设置出口节点时仅可访问 Tailnet 和已接受的子网。\nEnter 编辑  Ctrl+S 保存  Esc 返回", "Without an exit node only Tailnet and accepted subnets are reachable.\nEnter edit  Ctrl+S save  Esc back", "出口未設定では Tailnet と許可済みサブネットのみ。\nEnter 編集  Ctrl+S 保存  Esc 戻る")
         } else if fields.get(f.index) == Some(&Field::WsHost) && TYPES[f.protocol] == "trojan" {
             // Mihomo's trojan falls back to the server address for SNI, never to Host.
             l3(
@@ -816,7 +1099,12 @@ mod tests {
                 .record()
                 .unwrap();
             assert_eq!(edited.nodes[0]["udp"], true);
-            assert_eq!(edited.nodes[0]["server"], "192.0.2.1");
+            if *kind == "tailscale" {
+                assert!(edited.nodes[0].get("server").is_none());
+                assert_eq!(edited.nodes[0]["state-dir"], record.nodes[0]["state-dir"]);
+            } else {
+                assert_eq!(edited.nodes[0]["server"], "192.0.2.1");
+            }
         }
         let mut f = filled(0);
         f.port.load("65536");
@@ -1137,6 +1425,96 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+    #[test]
+    fn tailscale_form_keeps_identity_and_hides_auth_key() {
+        let mut form = Form::manual_tailscale(None, None);
+        form.name.load("My Tailnet");
+        form.tail_hostname.load("terc-laptop");
+        form.tail_auth_key.load("tskey-auth-test-sensitive");
+        form.tail_exit_node.load("100.64.0.7");
+        form.tail_accept_routes = true;
+        let record = form.record().unwrap();
+        let node = &record.nodes[0];
+        assert_eq!(node["type"], "tailscale");
+        assert_eq!(node["auth-key"], "tskey-auth-test-sensitive");
+        assert_eq!(node["hostname"], "terc-laptop");
+        assert_eq!(node["exit-node"], "100.64.0.7");
+        assert_eq!(node["accept-routes"], true);
+        assert_eq!(node["udp"], true);
+        assert!(node["state-dir"]
+            .as_str()
+            .unwrap()
+            .contains("tailscale/node-"));
+        assert!(node.get("server").is_none() && node.get("port").is_none());
+        let mut other = Form::manual_tailscale(None, None);
+        other.name.load("Other");
+        assert_ne!(form.tail_state_dir, other.tail_state_dir);
+        let mut edited_node = node.clone();
+        edited_node["ephemeral"] = json!(true);
+        let mut edit = Form::manual_tailscale(Some(0), Some(edited_node.clone()));
+        assert!(!edit.fields().contains(&Field::Server));
+        edit.name.load("Renamed");
+        let saved = edit.record().unwrap();
+        assert_eq!(saved.nodes[0]["state-dir"], edited_node["state-dir"]);
+        assert_eq!(saved.nodes[0]["ephemeral"], true);
+        let mut app = crate::App::from_snapshot(Default::default(), Default::default());
+        app.proxy_form = Some(edit);
+        select(&mut app, Field::TailAuthKey);
+        app.proxy_form.as_mut().unwrap().editing = true;
+        let screen = render(&app, 120);
+        assert!(!screen.contains("tskey-auth-test-sensitive"));
+        assert!(screen.contains("Authkey"));
+    }
+    #[test]
+    fn switching_protocols_keeps_credentials_separate() {
+        let mut form = Form {
+            kind: 1,
+            ..Form::default()
+        };
+        form.name.load("Example");
+        form.server.load("example.test");
+        form.secret.load("proxy-password");
+        form.protocol = TYPES.iter().position(|p| *p == "tailscale").unwrap();
+        assert!(form.record().unwrap().nodes[0].get("auth-key").is_none());
+        form.tail_auth_key.load("tskey-auth-example");
+        form.protocol = 0;
+        assert_eq!(
+            form.record().unwrap().nodes[0]["password"],
+            "proxy-password"
+        );
+        form.protocol = TYPES.iter().position(|p| *p == "tailscale").unwrap();
+        assert_eq!(
+            form.record().unwrap().nodes[0]["auth-key"],
+            "tskey-auth-example"
+        );
+    }
+    #[test]
+    fn attaching_tailscale_keeps_the_subscription_and_other_nodes() {
+        let original = ProfileSource {
+            name: "Airport".into(),
+            subscription_url: "https://example.test/sub".into(),
+            kind: "subscription".into(),
+            routing: "local".into(),
+            nodes: vec![
+                json!({"name":"Existing", "type":"http", "server":"example.test", "port":80}),
+            ],
+        };
+        let mut form = Form::manual_tailscale(None, None);
+        form.name.load("Tailnet");
+        form.tail_auth_key.load("tskey-auth-test");
+        let record = form.record().unwrap();
+        let merged = merge_manual_tailscale(original.clone(), record.clone(), None, None).unwrap();
+        assert_eq!(merged.subscription_url, original.subscription_url);
+        assert_eq!(merged.routing, original.routing);
+        assert_eq!(merged.nodes[0], original.nodes[0]);
+        assert_eq!(merged.nodes[1], record.nodes[0]);
+        assert!(merge_manual_tailscale(merged.clone(), record.clone(), None, None).is_err());
+        assert!(
+            merge_manual_tailscale(merged.clone(), record.clone(), Some(1), Some("changed"))
+                .is_err()
+        );
+        assert!(merge_manual_tailscale(merged, record, Some(1), Some("Tailnet")).is_ok());
     }
     fn select(app: &mut crate::App, field: Field) {
         let f = app.proxy_form.as_mut().unwrap();

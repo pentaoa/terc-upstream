@@ -1,6 +1,6 @@
 [package]
 name = "terc"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "A restrained terminal Mihomo (Clash.Meta) controller and visualizer for macOS and Linux."
 license = "MIT"

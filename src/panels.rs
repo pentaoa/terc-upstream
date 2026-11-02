@@ -1536,6 +1536,8 @@ fn translated(app: &App, id: &str, desc: bool) -> Option<String> {
         ("dns-fakeip", true) => "mod_dns_fakeip_desc",
         ("dns-fakeip-global", false) => "mod_dns_fakeip_global",
         ("dns-fakeip-global", true) => "mod_dns_fakeip_global_desc",
+        ("tailscale-dns", false) => "mod_dns_tailscale",
+        ("tailscale-dns", true) => "mod_dns_tailscale_desc",
         ("find-process", false) => "mod_find_process",
         ("find-process", true) => "mod_find_process_desc",
         ("tcp-concurrent", false) => "mod_tcp_concurrent",

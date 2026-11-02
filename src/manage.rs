@@ -349,6 +349,49 @@ impl App {
         self.set_status(l3(self, "测速中…", "Testing latency…", "測定中…"), false);
     }
 
+    /// Put an explicitly requested Tailnet route ahead of all existing rules.
+    pub fn route_tailnet_via_selected_node(&mut self) {
+        if self.action_busy {
+            return;
+        }
+        let Some(node) = self
+            .own_nodes
+            .get(self.own_node_index)
+            .and_then(|n| n.parsed.as_ref().ok())
+        else {
+            return;
+        };
+        if node["type"] != "tailscale" {
+            self.set_status("请选择 Tailscale 节点 / Select a Tailscale node", true);
+            return;
+        }
+        let name = node["name"].as_str().unwrap_or("");
+        if name.is_empty() || name.contains(',') {
+            self.set_status(
+                "节点名称不能包含逗号 / Node name cannot contain commas",
+                true,
+            );
+            return;
+        }
+        if !self
+            .snapshot
+            .nodes
+            .get(name)
+            .is_some_and(|n| n.kind.eq_ignore_ascii_case("tailscale"))
+        {
+            self.set_status("节点未在内核中就绪或与订阅重名 / Node unavailable or name conflicts with subscription", true);
+            return;
+        }
+        let rule = format!("DOMAIN-SUFFIX,ts.net,{name}");
+        self.private_rules = PrivateRules::load(&crate::compose::terc_dir());
+        if self.private_rules.rules.first() == Some(&rule) {
+            self.set_status("规则已在最前 / Rule already has priority", false);
+            return;
+        }
+        prioritize_tailnet_rule(&mut self.private_rules, rule);
+        self.save_rules_and_apply();
+    }
+
     fn save_rules_and_apply(&mut self) {
         if let Err(err) = self.private_rules.save(&crate::compose::terc_dir()) {
             self.set_status(&err, true);
@@ -491,6 +534,11 @@ impl App {
     }
 }
 
+fn prioritize_tailnet_rule(rules: &mut PrivateRules, rule: String) {
+    rules.rules.retain(|existing| existing != &rule);
+    rules.rules.insert(0, rule);
+}
+
 fn move_cursor(index: &mut usize, len: usize, down: bool) {
     if len == 0 {
         *index = 0;
@@ -543,6 +591,10 @@ pub fn handle_manage_paste(app: &mut App, text: &str) {
 }
 
 pub fn handle_own_nodes_key(app: &mut App, key: KeyEvent) {
+    if app.proxy_form.is_some() {
+        crate::proxy_form::handle(app, key);
+        return;
+    }
     if app.manage_input.is_some() {
         handle_editor_key(app, key);
         return;
@@ -556,6 +608,23 @@ pub fn handle_own_nodes_key(app: &mut App, key: KeyEvent) {
             move_cursor(&mut app.own_node_index, app.own_nodes.len(), true)
         }
         KeyCode::Char('a') => app.start_manage_input(ManageInput::AddNode),
+        KeyCode::Char('t') => {
+            app.proxy_form = Some(crate::proxy_form::Form::manual_tailscale(None, None))
+        }
+        KeyCode::Char('g') => app.route_tailnet_via_selected_node(),
+        KeyCode::Char('e') => {
+            if let Some(node) = app
+                .own_nodes
+                .get(app.own_node_index)
+                .and_then(|n| n.parsed.as_ref().ok())
+                .filter(|n| n["type"] == "tailscale")
+            {
+                app.proxy_form = Some(crate::proxy_form::Form::manual_tailscale(
+                    Some(app.own_node_index),
+                    Some(node.clone()),
+                ));
+            }
+        }
         KeyCode::Char('d') | KeyCode::Delete => app.remove_selected_own_node(),
         KeyCode::Char('r') | KeyCode::Enter => app.test_own_nodes(false),
         KeyCode::Char('A') => app.test_own_nodes(true),
@@ -650,7 +719,11 @@ pub fn draw_own_nodes(frame: &mut Frame, app: &App, area: Rect) {
         Some(panel_title("手动节点 / Manual nodes".into(), app.theme())),
         true,
     );
-    draw_manual_nodes_content(frame, app, inner);
+    if app.proxy_form.is_some() {
+        crate::proxy_form::draw(frame, app, inner);
+    } else {
+        draw_manual_nodes_content(frame, app, inner);
+    }
 }
 
 fn draw_manual_nodes_content(frame: &mut Frame, app: &App, inner: Rect) {
@@ -764,9 +837,9 @@ fn draw_manual_nodes_content(frame: &mut Frame, app: &App, inner: Rect) {
         } else {
             l3(
                 app,
-                "a 添加  d 删除  r/Enter 测速  A 全部测速  Esc 关闭  密码只存本机、不显示",
-                "a add  d delete  r/Enter test  A test all  Esc close  secrets stay local, never shown",
-                "a 追加  d 削除  r 測定  A 全測定  Esc 閉じる",
+                "a 粘贴  t 添加 Tailscale  e 编辑  g 将 ts.net 指向所选节点  d 删除  r 测速  A 全部测速  Esc 返回",
+                "a paste  t add Tailscale  e edit  g route ts.net via selected  d delete  r test  A test all  Esc back",
+                "a 貼付  t Tailscale 追加  e 編集  g ts.net を選択ノードへ  d 削除  r 測定  A 全測定  Esc 戻る",
             )
         },
     );
@@ -1160,4 +1233,41 @@ pub fn draw_profile_hub(frame: &mut Frame, app: &App, area: Rect) {
         .style(Style::default().fg(theme.muted)),
         rows[4],
     );
+}
+
+#[cfg(test)]
+mod tailscale_rule_tests {
+    use super::*;
+
+    #[test]
+    fn own_nodes_opens_and_cancels_tailscale_form() {
+        let mut app = App::from_snapshot(Default::default(), Default::default());
+        app.overlay = Overlay::OwnNodes;
+        handle_own_nodes_key(&mut app, KeyEvent::from(KeyCode::Char('t')));
+        assert!(app.proxy_form.as_ref().unwrap().manual_tailscale);
+        handle_own_nodes_key(&mut app, KeyEvent::from(KeyCode::Esc));
+        assert!(app.proxy_form.is_none());
+        assert_eq!(app.overlay, Overlay::OwnNodes);
+    }
+
+    #[test]
+    fn route_takes_priority_without_removing_existing_rules() {
+        let mut rules = PrivateRules {
+            rules: vec![
+                "DOMAIN-SUFFIX,ts.net,DIRECT".into(),
+                "DOMAIN-SUFFIX,ts.net,Tailnet".into(),
+                "DOMAIN,example.org,PROXY".into(),
+            ],
+            ..Default::default()
+        };
+        prioritize_tailnet_rule(&mut rules, "DOMAIN-SUFFIX,ts.net,Tailnet".into());
+        assert_eq!(
+            rules.rules,
+            vec![
+                "DOMAIN-SUFFIX,ts.net,Tailnet",
+                "DOMAIN-SUFFIX,ts.net,DIRECT",
+                "DOMAIN,example.org,PROXY",
+            ]
+        );
+    }
 }
